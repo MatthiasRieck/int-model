@@ -1,0 +1,8 @@
+-r requirements-back-compatibility.txt
+
+black
+pytest
+pytest-cov
+pylint
+mypy
+tox

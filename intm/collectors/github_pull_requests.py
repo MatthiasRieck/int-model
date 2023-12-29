@@ -140,7 +140,7 @@ class GithubPullRequestCollector(Thread):
             )
 
     def _update_pull_requests(self, pull_requests: List[PullRequest]):
-        for pr in pull_requests:
-            self.pull_requests_map[pr.id] = pr
-            self.pull_requests_needing_update_ids.discard(pr.id)
-            self.pull_requests_needing_update_uris.discard(pr.uri)
+        for pull_request in pull_requests:
+            self.pull_requests_map[pull_request.id] = pull_request
+            self.pull_requests_needing_update_ids.discard(pull_request.id)
+            self.pull_requests_needing_update_uris.discard(pull_request.uri)

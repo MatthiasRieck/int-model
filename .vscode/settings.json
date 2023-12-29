@@ -1,0 +1,21 @@
+{
+    "python.testing.pytestArgs": ["tests"],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "python.formatting.provider": "none",
+    "python.formatting.blackArgs": [
+      "--line-length",
+      "120"
+    ],
+    "pylint.args": [
+      "--ignore-patterns=test_*,mock_*",
+      "--extension-pkg-whitelist='pydantic'",
+      "--disable=R,C0302",
+      "--max-line-length=120"
+    ],
+    "liveServer.settings.port": 5501,
+    "[python]": {
+      "editor.defaultFormatter": "ms-python.black-formatter"
+    }
+  }
+  

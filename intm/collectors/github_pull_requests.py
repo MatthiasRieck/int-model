@@ -152,7 +152,7 @@ class GithubPullRequestCollector(Thread):
 
     def _update_pull_requests(self, pull_requests: List[PullRequest]):
         for pull_request in pull_requests:
-            self.pull_requests_map[pull_request.id] = PullRequestContainer(
+            self.pull_requests_map[pull_request.uri] = PullRequestContainer(
                 pull_request=pull_request,
                 last_data_pull_at=datetime.utcnow(),
             )

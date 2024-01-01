@@ -128,7 +128,7 @@ class GithubPullRequestCollector(Thread):
     def _need_update_collect(self):
         # Update PRs based on their id
         if self.pull_requests_needing_update_ids:
-            update_ids = list(self.pull_requests_needing_update_ids)[:50]
+            update_ids = sorted(list(self.pull_requests_needing_update_ids)[:50])
             self._update_pull_requests(
                 self.github.get_pull_requests_by_ids(update_ids, PR_QUERY_DATA)
             )
@@ -142,9 +142,10 @@ class GithubPullRequestCollector(Thread):
                 filter(lambda x: x.split("#")[0] == owner_with_name, pr_uris)
             )
             update_uris = pr_uris_with_correct_owner_with_name[:50]
+            update_numbers = sorted([uri.split("#")[1] for uri in update_uris], key=int)
             self._update_pull_requests(
                 self.github.search_pull_requests(
-                    f'repo:{owner_with_name} is:pr {" ".join(update_uris)}',
+                    f'repo:{owner_with_name} is:pr {" ".join(update_numbers)}',
                     PR_QUERY_DATA,
                 )
             )

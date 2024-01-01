@@ -91,6 +91,7 @@ class GithubPullRequestCollector(Thread):
 
         self.github = github
         self.wait_time = wait_time
+        self._keep_running: bool = True
 
         self.pull_requests_map: Dict[str, PullRequestContainer] = {}
         self.queries: List[CollectQuery] = queries
@@ -100,7 +101,9 @@ class GithubPullRequestCollector(Thread):
         self.pull_requests_needing_update_uris: Set[str] = set()
 
     def _run(self):
-        while True:
+        keep_running = True
+
+        while keep_running:
             for query in self.queries:
                 self._update_pull_requests(
                     self.github.search_pull_requests(query.query, PR_QUERY_DATA)
@@ -114,6 +117,13 @@ class GithubPullRequestCollector(Thread):
             self._need_update_collect()
 
             _internal_sleep(self.wait_time.total_seconds())
+
+            # This is done this way to make sure in testing that the thread is run at least once
+            keep_running = self._keep_running
+
+    def stop(self) -> None:
+        """Stops the collector"""
+        self._keep_running = False
 
     def _need_update_collect(self):
         # Update PRs based on their id
@@ -141,6 +151,9 @@ class GithubPullRequestCollector(Thread):
 
     def _update_pull_requests(self, pull_requests: List[PullRequest]):
         for pull_request in pull_requests:
-            self.pull_requests_map[pull_request.id] = pull_request
+            self.pull_requests_map[pull_request.id] = PullRequestContainer(
+                pull_request=pull_request,
+                last_data_pull_at=datetime.utcnow(),
+            )
             self.pull_requests_needing_update_ids.discard(pull_request.id)
             self.pull_requests_needing_update_uris.discard(pull_request.uri)

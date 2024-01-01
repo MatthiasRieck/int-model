@@ -1,15 +1,17 @@
 from unittest import TestCase
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, call
 from datetime import datetime, timedelta
 import time
 
 from gitaudit.github.instance import Github
+from gitaudit.github.graphql_objects import PullRequest, Repository
 
 from intm.collectors.github_pull_requests import (
     ConstantCollectQuery,
     RecentlyUpdatedPullRequests,
     const_queries_from_list,
     GithubPullRequestCollector,
+    PR_QUERY_DATA,
 )
 
 
@@ -50,14 +52,54 @@ class TestGithubPullRequestCollector(TestCase):
 
         super().tearDown()
 
-    # def test_run_empty(self):
-    #     github = Mock(spec=Github)
-    #     collector = GithubPullRequestCollector(
-    #         github, queries=[], wait_time=timedelta(seconds=1)
-    #     )
+    def test_run_empty_check_wait(self):
+        github = Mock(spec=Github)
+        collector = GithubPullRequestCollector(
+            github,
+            queries=[],
+        )
 
-    #     collector.start()
+        collector.start()
+        collector.stop()
 
-    #     time.sleep(0.1)
+        collector.join()
 
-    #     self.mock_sleep.assert_called_with(60 * 5)
+        self.mock_sleep.assert_called_with(60 * 5)
+
+    def test_run_queries(self):
+        with patch("intm.collectors.github_pull_requests.datetime") as mock_utc_now:
+            mock_utc_now.utcnow.return_value = datetime(2010, 10, 8, 11, 43)
+
+            github = Mock(spec=Github)
+            collector = GithubPullRequestCollector(
+                github,
+                queries=const_queries_from_list(["query1", "query2"]),
+                update_query=ConstantCollectQuery("update"),
+            )
+
+            repo = Repository(name_with_owner="owner/name")
+            github.search_pull_requests.side_effect = [
+                [
+                    PullRequest(number=1, title="title1", id="id1", repository=repo),
+                    PullRequest(number=2, title="title2", id="id2", repository=repo),
+                ],
+                [
+                    PullRequest(number=3, title="title3", id="id3", repository=repo),
+                    PullRequest(number=4, title="title4", id="id4", repository=repo),
+                ],
+                [],
+            ]
+
+            collector.start()
+            collector.stop()
+
+            collector.join()
+
+            github.search_pull_requests.mock_calls[0] == call("query1", PR_QUERY_DATA)
+            github.search_pull_requests.mock_calls[1] == call("query2", PR_QUERY_DATA)
+            github.search_pull_requests.mock_calls[2] == call("update", PR_QUERY_DATA)
+
+            for pull_request in collector.pull_requests_map.values():
+                self.assertEqual(
+                    pull_request.last_data_pull_at, datetime(2010, 10, 8, 11, 43)
+                )

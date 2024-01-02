@@ -1,3 +1,4 @@
 gitaudit
 humps
 pydantic==1.10.10
+validators

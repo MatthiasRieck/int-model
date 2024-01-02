@@ -34,7 +34,12 @@ class CollectQuery:
 
     @property
     def query(self):
-        """Query to collect pull requests"""
+        """
+        Query to collect pull requests
+
+        Raises:
+            NotImplementedError: If not implemented
+        """
         raise NotImplementedError
 
 

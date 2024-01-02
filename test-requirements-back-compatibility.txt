@@ -6,3 +6,4 @@ pytest-cov
 pylint
 mypy
 tox
+darglint

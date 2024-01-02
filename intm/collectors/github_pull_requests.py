@@ -1,8 +1,9 @@
 """Collects pull requests from github"""
 
 from threading import Thread
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Tuple, Optional, Callable
 import time
+import re
 
 from datetime import timedelta, datetime
 
@@ -12,6 +13,7 @@ from pydantic import Field
 
 from gitaudit.github.instance import Github
 from gitaudit.github.graphql_objects import PullRequest
+import validators
 
 from intm.base import RootModel
 
@@ -77,6 +79,55 @@ def _internal_sleep(seconds: int) -> None:
     time.sleep(seconds)
 
 
+def pull_request_url_to_uri(url: str) -> str:
+    """
+    Converts a pull request url to a uri
+
+    Args:
+        url: Pull request url
+
+    Returns:
+        str: Pull request uri
+    """
+
+    split_url = url.split("/")
+
+    assert len(split_url) >= 4, f"Pull request url {url} does not have enough parts"
+    assert re.fullmatch(
+        r"\d+", split_url[-1]
+    ), f"Pull request url {url} does not end with a number"
+    assert (
+        split_url[-2] == "pull"
+    ), f"Pull request url {url} does not end with /pull/<number>"
+
+    return f"{split_url[-4]}/{split_url[-3]}#{split_url[-1]}"
+
+
+def zuul_dependencies_from_pull_request(
+    pull_request: PullRequest,
+) -> Tuple[List[str], List[str]]:
+    """
+    Gets zuul dependencies from a pull request
+
+    Args:
+        pull_request: Pull request to get zuul dependencies from
+
+    Returns:
+        Tuple[List[str], List[str]]: Dependencies as two lists, first list of IDs and second list of URIs
+    """
+
+    deps = re.findall(r"^Depends-On:\s?(.*?)$", pull_request.body, re.MULTILINE)
+
+    deps = list(map(lambda x: re.split(r"\s+", x)[0].strip(), deps))
+
+    valid_deps: List[str] = list(filter(validators.url, deps))
+
+    return [], list(map(pull_request_url_to_uri, valid_deps))
+
+
+DependencyCallback = Callable[[PullRequest], Tuple[List[str], List[str]]]
+
+
 class GithubPullRequestCollector(Thread):
     """Collects pull requests from github"""
 
@@ -85,12 +136,14 @@ class GithubPullRequestCollector(Thread):
         github: Github,
         queries: List[CollectQuery],
         update_query: Optional[CollectQuery] = None,
+        dependencies_callback: Optional[DependencyCallback] = None,
         wait_time: timedelta = timedelta(minutes=5),
     ) -> None:
         super().__init__(target=self._run)
 
         self.github = github
         self.wait_time = wait_time
+        self.dependencies_callback = dependencies_callback
         self._keep_running: bool = True
 
         self.pull_requests_map: Dict[str, PullRequestContainer] = {}
@@ -151,10 +204,29 @@ class GithubPullRequestCollector(Thread):
             )
 
     def _update_pull_requests(self, pull_requests: List[PullRequest]):
+        all_ids = set(
+            map(lambda x: x.pull_request.id, self.pull_requests_map.values())
+        ) | set(map(lambda x: x.id, pull_requests))
+
         for pull_request in pull_requests:
+            dep_ids, dep_uris = (
+                self.dependencies_callback(pull_request)
+                if self.dependencies_callback
+                else ([], [])
+            )
+
             self.pull_requests_map[pull_request.uri] = PullRequestContainer(
                 pull_request=pull_request,
                 last_data_pull_at=datetime.utcnow(),
+                dependencies=dep_ids + dep_uris,
             )
+
+            self.pull_requests_needing_update_ids.update(
+                filter(lambda x: x not in all_ids, dep_ids)
+            )
+            self.pull_requests_needing_update_uris.update(
+                filter(lambda x: x not in self.pull_requests_map, dep_uris)
+            )
+
             self.pull_requests_needing_update_ids.discard(pull_request.id)
             self.pull_requests_needing_update_uris.discard(pull_request.uri)

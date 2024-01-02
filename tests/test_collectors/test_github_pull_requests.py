@@ -14,6 +14,9 @@ from intm.collectors.github_pull_requests import (
     _internal_sleep,
     GithubPullRequestCollector,
     PR_QUERY_DATA,
+    pull_request_url_to_uri,
+    zuul_dependencies_from_pull_request,
+    PullRequestContainer,
 )
 
 
@@ -64,6 +67,110 @@ class TestInternalSleep(TestCase):
         _internal_sleep(5)
 
         self.mock_time_sleep.assert_called_with(5)
+
+
+class TestPullRequestUrlToUri(TestCase):
+    def test_normal(self):
+        self.assertEqual(
+            pull_request_url_to_uri(
+                "https://github.com/MatthiasRieck/int-model/pull/5"
+            ),
+            "MatthiasRieck/int-model#5",
+        )
+
+    def test_just_enough_parts(self):
+        self.assertEqual(
+            pull_request_url_to_uri("MatthiasRieck/int-model/pull/5"),
+            "MatthiasRieck/int-model#5",
+        )
+
+    def test_not_enough_parts(self):
+        with self.assertRaises(AssertionError) as ctx:
+            pull_request_url_to_uri("int-model/pull/5")
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Pull request url int-model/pull/5 does not have enough parts",
+        )
+
+    def test_does_not_end_with_number(self):
+        with self.assertRaises(AssertionError) as ctx:
+            pull_request_url_to_uri("MatthiasRieck/int-model/pull/abc")
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Pull request url MatthiasRieck/int-model/pull/abc does not end with a number",
+        )
+
+    def test_does_not_contains_pull_in_url(self):
+        with self.assertRaises(AssertionError) as ctx:
+            pull_request_url_to_uri("https://github.com/MatthiasRieck/int-model/5")
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Pull request url https://github.com/MatthiasRieck/int-model/5 does not end with /pull/<number>",
+        )
+
+
+class TestZuulDependenciesFromPullRequest(TestCase):
+    def test_normal(self):
+        self.assertEqual(
+            zuul_dependencies_from_pull_request(PullRequest(body="")),
+            ([], []),
+        )
+
+    def test_dependency(self):
+        self.assertEqual(
+            zuul_dependencies_from_pull_request(
+                PullRequest(
+                    body="Depends-On: https://github.com/MatthiasRieck/int-model/pull/5",
+                ),
+            ),
+            ([], ["MatthiasRieck/int-model#5"]),
+        )
+
+    def test_invalid_dependency(self):
+        self.assertEqual(
+            zuul_dependencies_from_pull_request(
+                PullRequest(
+                    body="Depends-On: httpgithub.com/MatthiasRieck/int-model/pull/5",
+                ),
+            ),
+            ([], []),
+        )
+
+    def test_formerly_dependency(self):
+        self.assertEqual(
+            zuul_dependencies_from_pull_request(
+                PullRequest(
+                    body="Formerly-Depends-On: https://github.com/MatthiasRieck/int-model/pull/5",
+                ),
+            ),
+            ([], []),
+        )
+
+    def test_multiple_dependencies(self):
+        self.assertEqual(
+            zuul_dependencies_from_pull_request(
+                PullRequest(
+                    body=(
+                        "Depends-On: https://github.com/MatthiasRieck/int-model/pull/5"
+                        "\n"
+                        "Depends-On: https://github.com/MatthiasRieck/int-model/pull/3 (This is a comment)"
+                        "\n"
+                        "Depends-On: https://github.com/MatthiasRieck/int-model/pull/1"
+                    ),
+                ),
+            ),
+            (
+                [],
+                [
+                    "MatthiasRieck/int-model#5",
+                    "MatthiasRieck/int-model#3",
+                    "MatthiasRieck/int-model#1",
+                ],
+            ),
+        )
 
 
 class TestGithubPullRequestCollector(TestCase):
@@ -172,5 +279,74 @@ class TestGithubPullRequestCollector(TestCase):
         )
         github.search_pull_requests.assert_called_once_with(
             "repo:owner/name is:pr 8 9 45",
+            PR_QUERY_DATA,
+        )
+
+    def test_generate_new_updates_due_to_dependencies(self):
+        """
+        In case a pull request has dependencies there is the need to check if this
+        requires the collector to pull additional dependencies.
+
+        What shall be tested is the following.
+        - a pull request is queried by the collector, it has 4 dependencies
+        - two are ID based where one exists
+        - two are URI based where one exists
+        - So in the end we should have 2 additional pull requests that need to be queried
+        """
+        repo = Repository(name_with_owner="owner/name")
+
+        github = Mock(spec=Github)
+        github.get_pull_requests_by_ids.side_effect = [
+            [
+                PullRequest(number=2, id="id2", repository=repo),
+            ],
+        ]
+        github.search_pull_requests.side_effect = [
+            [
+                PullRequest(number=0, id="id0", repository=repo),
+            ],
+            [
+                PullRequest(number=4, id="id4", repository=repo),
+            ],
+        ]
+
+        dependency_mock = Mock()
+        dependency_mock.side_effect = [
+            (
+                ["id1", "id2"],
+                ["owner/name#3", "owner/name#4"],
+            ),
+            ([], []),
+            ([], []),
+        ]
+
+        collector = GithubPullRequestCollector(
+            github,
+            queries=const_queries_from_list(["query"]),
+            dependencies_callback=dependency_mock,
+        )
+
+        collector.pull_requests_map = {
+            "owner/name#1": PullRequestContainer(
+                pull_request=PullRequest(id="id1", repository=repo, number=1),
+                last_data_pull_at=datetime.utcnow(),
+            ),
+            "owner/name#3": PullRequestContainer(
+                pull_request=PullRequest(id="id3", repository=repo, number=3),
+                last_data_pull_at=datetime.utcnow(),
+            ),
+        }
+
+        collector.start()
+        collector.stop()
+
+        collector.join()
+
+        github.search_pull_requests.mock_calls[0] == call("query", PR_QUERY_DATA)
+        github.search_pull_requests.mock_calls[1] == call(
+            "repo:owner/name is:pr 4", PR_QUERY_DATA
+        )
+        github.get_pull_requests_by_ids.assert_called_once_with(
+            ["id2"],
             PR_QUERY_DATA,
         )

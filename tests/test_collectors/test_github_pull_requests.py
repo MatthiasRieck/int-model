@@ -17,6 +17,7 @@ from intm.collectors.github_pull_requests import (
     pull_request_url_to_uri,
     zuul_dependencies_from_pull_request,
     PullRequestContainer,
+    open_pull_request_last_update_30_minutes_ago,
 )
 
 
@@ -173,6 +174,38 @@ class TestZuulDependenciesFromPullRequest(TestCase):
         )
 
 
+class TestOpenPullRequestLastUpdate30MinutesAgo(TestCase):
+    def test_needs_update_open(self):
+        self.assertTrue(
+            open_pull_request_last_update_30_minutes_ago(
+                PullRequestContainer(
+                    pull_request=PullRequest(state="OPEN"),
+                    updated_at=datetime.utcnow() - timedelta(minutes=31),
+                ),
+            ),
+        )
+
+    def test_does_not_need_update_merged(self):
+        self.assertFalse(
+            open_pull_request_last_update_30_minutes_ago(
+                PullRequestContainer(
+                    pull_request=PullRequest(state="MERGED"),
+                    updated_at=datetime.utcnow() - timedelta(minutes=31),
+                ),
+            ),
+        )
+
+    def test_does_not_need_update_open(self):
+        self.assertFalse(
+            open_pull_request_last_update_30_minutes_ago(
+                PullRequestContainer(
+                    pull_request=PullRequest(state="OPEN"),
+                    updated_at=datetime.utcnow() - timedelta(minutes=29),
+                ),
+            ),
+        )
+
+
 class TestGithubPullRequestCollector(TestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -189,7 +222,6 @@ class TestGithubPullRequestCollector(TestCase):
         github = Mock(spec=Github)
         collector = GithubPullRequestCollector(
             github,
-            queries=[],
         )
 
         collector.start()
@@ -233,9 +265,7 @@ class TestGithubPullRequestCollector(TestCase):
             github.search_pull_requests.mock_calls[2] == call("update", PR_QUERY_DATA)
 
             for pull_request in collector.pull_requests_map.values():
-                self.assertEqual(
-                    pull_request.last_data_pull_at, datetime(2010, 10, 8, 11, 43)
-                )
+                self.assertEqual(pull_request.updated_at, datetime(2010, 10, 8, 11, 43))
 
     def test_need_update(self):
         github = Mock(spec=Github)
@@ -329,11 +359,11 @@ class TestGithubPullRequestCollector(TestCase):
         collector.pull_requests_map = {
             "owner/name#1": PullRequestContainer(
                 pull_request=PullRequest(id="id1", repository=repo, number=1),
-                last_data_pull_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
             ),
             "owner/name#3": PullRequestContainer(
                 pull_request=PullRequest(id="id3", repository=repo, number=3),
-                last_data_pull_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
             ),
         }
 
@@ -348,5 +378,70 @@ class TestGithubPullRequestCollector(TestCase):
         )
         github.get_pull_requests_by_ids.assert_called_once_with(
             ["id2"],
+            PR_QUERY_DATA,
+        )
+
+    def test_calculate_pull_request_needs_update(self):
+        """
+        In case of it can be that a pull request has not been updated in a long time, therefore,
+        there is the ability to specify externally through functions in case a pull request shall be
+        updated.
+        """
+        repo = Repository(name_with_owner="owner/name")
+        pr_one = PullRequest(id="id1", repository=repo, number=1)
+        pr_two = PullRequest(id="id2", repository=repo, number=2)
+        pr_three = PullRequest(id="id3", repository=repo, number=3)
+
+        github = Mock(spec=Github)
+        github.get_pull_requests_by_ids.side_effect = [
+            [
+                pr_one,
+                pr_two,
+            ],
+        ]
+
+        callback_need_update_one = Mock()
+        callback_need_update_one.side_effect = [
+            True,
+            False,
+            False,
+        ]
+        callback_need_update_two = Mock()
+        callback_need_update_two.side_effect = [
+            False,
+            True,
+            False,
+        ]
+
+        collector = GithubPullRequestCollector(
+            github,
+            need_update_callbacks=[
+                callback_need_update_one,
+                callback_need_update_two,
+            ],
+        )
+
+        collector.pull_requests_map = {
+            "owner/name#1": PullRequestContainer(
+                pull_request=pr_one,
+                updated_at=datetime.utcnow(),
+            ),
+            "owner/name#2": PullRequestContainer(
+                pull_request=pr_two,
+                updated_at=datetime.utcnow(),
+            ),
+            "owner/name#3": PullRequestContainer(
+                pull_request=pr_three,
+                updated_at=datetime.utcnow(),
+            ),
+        }
+
+        collector.start()
+        collector.stop()
+
+        collector.join()
+
+        github.get_pull_requests_by_ids.assert_called_once_with(
+            ["id1", "id2"],
             PR_QUERY_DATA,
         )

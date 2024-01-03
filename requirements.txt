@@ -1,4 +1,4 @@
-gitaudit
+gitaudit>=0.18.1
 humps
 pydantic
 validators

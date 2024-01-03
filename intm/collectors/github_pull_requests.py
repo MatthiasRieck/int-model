@@ -12,7 +12,7 @@ from pydantic import Field
 
 
 from gitaudit.github.instance import Github
-from gitaudit.github.graphql_objects import PullRequest
+from gitaudit.github.graphql_objects import PullRequest, PullRequestState
 import validators
 
 from intm.base import RootModel
@@ -26,7 +26,21 @@ class PullRequestContainer(RootModel):
 
     pull_request: PullRequest
     dependencies: List[str] = Field(default_factory=list)
-    last_data_pull_at: datetime
+    updated_at: datetime
+
+    @property
+    def is_open(self) -> bool:
+        """
+        Returns True if pull request is open
+
+        Returns:
+            bool: True if pull request is open
+        """
+        return self.pull_request.state == PullRequestState.OPEN
+
+
+DependencyCallback = Callable[[PullRequest], Tuple[List[str], List[str]]]
+NeedUpdateCallback = Callable[[PullRequestContainer], bool]
 
 
 class CollectQuery:
@@ -130,7 +144,22 @@ def zuul_dependencies_from_pull_request(
     return [], list(map(pull_request_url_to_uri, valid_deps))
 
 
-DependencyCallback = Callable[[PullRequest], Tuple[List[str], List[str]]]
+def open_pull_request_last_update_30_minutes_ago(
+    pr_container: PullRequestContainer,
+) -> bool:
+    """
+    Checks if an open pull request was last updated 30 minutes ago
+
+    Args:
+        pr_container: Pull request container to check
+
+    Returns:
+        bool: True if pull request was last updated 30 minutes ago
+    """
+
+    return pr_container.is_open and pr_container.updated_at < (
+        datetime.utcnow() - timedelta(minutes=30)
+    )
 
 
 class GithubPullRequestCollector(Thread):
@@ -139,9 +168,10 @@ class GithubPullRequestCollector(Thread):
     def __init__(
         self,
         github: Github,
-        queries: List[CollectQuery],
+        queries: Optional[List[CollectQuery]] = None,
         update_query: Optional[CollectQuery] = None,
         dependencies_callback: Optional[DependencyCallback] = None,
+        need_update_callbacks: Optional[List[NeedUpdateCallback]] = None,
         wait_time: timedelta = timedelta(minutes=5),
     ) -> None:
         super().__init__(target=self._run)
@@ -149,10 +179,13 @@ class GithubPullRequestCollector(Thread):
         self.github = github
         self.wait_time = wait_time
         self.dependencies_callback = dependencies_callback
+        self.need_update_callbacks = (
+            need_update_callbacks if need_update_callbacks else []
+        )
         self._keep_running: bool = True
 
         self.pull_requests_map: Dict[str, PullRequestContainer] = {}
-        self.queries: List[CollectQuery] = queries
+        self.queries: List[CollectQuery] = queries if queries else []
         self.update_query: Optional[CollectQuery] = update_query
 
         self.pull_requests_needing_update_ids: Set[str] = set()
@@ -171,6 +204,13 @@ class GithubPullRequestCollector(Thread):
                 self._update_pull_requests(
                     self.github.search_pull_requests(self.update_query, PR_QUERY_DATA)
                 )
+
+            for pr_container in self.pull_requests_map.values():
+                for callback in self.need_update_callbacks:
+                    if callback(pr_container):
+                        self.pull_requests_needing_update_ids.add(
+                            pr_container.pull_request.id
+                        )
 
             self._need_update_collect()
 
@@ -222,7 +262,7 @@ class GithubPullRequestCollector(Thread):
 
             self.pull_requests_map[pull_request.uri] = PullRequestContainer(
                 pull_request=pull_request,
-                last_data_pull_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
                 dependencies=dep_ids + dep_uris,
             )
 

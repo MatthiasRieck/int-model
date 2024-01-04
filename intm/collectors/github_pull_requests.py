@@ -1,7 +1,7 @@
 """Collects pull requests from github"""
 
 from threading import Thread
-from typing import List, Dict, Set, Tuple, Optional, Callable
+from typing import List, Dict, Set, Tuple, Optional, Callable, Union
 import time
 import re
 
@@ -12,7 +12,12 @@ from pydantic import Field
 
 
 from gitaudit.github.instance import Github
-from gitaudit.github.graphql_objects import PullRequest, PullRequestState
+from gitaudit.github.graphql_objects import (
+    PullRequest,
+    PullRequestState,
+    CheckRun,
+    StatusContext,
+)
 import validators
 
 from intm.base import RootModel
@@ -21,12 +26,21 @@ from intm.base import RootModel
 PR_QUERY_DATA = """title"""
 
 
+class RequiredStatusCheck(RootModel):
+    """Required status check"""
+
+    name: str
+
+
 class PullRequestContainer(RootModel):
     """Container for pull requests"""
 
     pull_request: PullRequest
-    dependencies: List[str] = Field(default_factory=list)
     updated_at: datetime
+    dependencies: List[str] = Field(default_factory=list)
+    required_status_checks: List[
+        Union[CheckRun, StatusContext, RequiredStatusCheck]
+    ] = Field(default_factory=list)
 
     @property
     def is_open(self) -> bool:
@@ -41,6 +55,7 @@ class PullRequestContainer(RootModel):
 
 DependencyCallback = Callable[[PullRequest], Tuple[List[str], List[str]]]
 NeedUpdateCallback = Callable[[PullRequestContainer], bool]
+RequiredStatusChecksCallback = Callable[[PullRequest], List[str]]
 
 
 class CollectQuery:
@@ -172,6 +187,7 @@ class GithubPullRequestCollector(Thread):
         update_query: Optional[CollectQuery] = None,
         dependencies_callback: Optional[DependencyCallback] = None,
         need_update_callbacks: Optional[List[NeedUpdateCallback]] = None,
+        required_status_checks_callback: Optional[RequiredStatusChecksCallback] = None,
         wait_time: timedelta = timedelta(minutes=5),
     ) -> None:
         super().__init__(target=self._run)
@@ -182,6 +198,7 @@ class GithubPullRequestCollector(Thread):
         self.need_update_callbacks = (
             need_update_callbacks if need_update_callbacks else []
         )
+        self.required_status_checks_callback = required_status_checks_callback
         self._keep_running: bool = True
 
         self.pull_requests_map: Dict[str, PullRequestContainer] = {}
@@ -260,10 +277,34 @@ class GithubPullRequestCollector(Thread):
                 else ([], [])
             )
 
+            if self.required_status_checks_callback:
+                required_status_check_names = self.required_status_checks_callback(
+                    pull_request
+                )
+            else:
+                required_status_check_names = []
+
+            required_status_checks_map = {
+                name: RequiredStatusCheck(name=name)
+                for name in required_status_check_names
+            }
+
+            if pull_request.status_check_rollup:
+                for status_check in pull_request.status_check_rollup.contexts:
+                    if isinstance(status_check, CheckRun):
+                        if status_check.name in required_status_checks_map:
+                            required_status_checks_map[status_check.name] = status_check
+                    else:
+                        if status_check.context in required_status_checks_map:
+                            required_status_checks_map[
+                                status_check.context
+                            ] = status_check
+
             self.pull_requests_map[pull_request.uri] = PullRequestContainer(
                 pull_request=pull_request,
                 updated_at=datetime.utcnow(),
                 dependencies=dep_ids + dep_uris,
+                required_status_checks=list(required_status_checks_map.values()),
             )
 
             self.pull_requests_needing_update_ids.update(

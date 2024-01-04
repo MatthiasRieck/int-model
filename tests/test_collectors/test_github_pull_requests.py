@@ -4,7 +4,13 @@ from datetime import datetime, timedelta
 import time
 
 from gitaudit.github.instance import Github
-from gitaudit.github.graphql_objects import PullRequest, Repository
+from gitaudit.github.graphql_objects import (
+    PullRequest,
+    Repository,
+    StatusCheckRollup,
+    CheckRun,
+    StatusContext,
+)
 
 from intm.collectors.github_pull_requests import (
     CollectQuery,
@@ -18,6 +24,7 @@ from intm.collectors.github_pull_requests import (
     zuul_dependencies_from_pull_request,
     PullRequestContainer,
     open_pull_request_last_update_30_minutes_ago,
+    RequiredStatusCheck,
 )
 
 
@@ -224,12 +231,38 @@ class TestGithubPullRequestCollector(TestCase):
             github,
         )
 
+        collector.stop()  # call stop before start to ensure only one execution
         collector.start()
-        collector.stop()
 
         collector.join()
 
         self.mock_sleep.assert_called_with(60 * 5)
+
+    def test_one_query_single_call(self):
+        """
+        Bug hunting that search_pull_requests is called multiple times
+        """
+        repo = Repository(name_with_owner="owner/name")
+
+        github = Mock(spec=Github)
+        github.search_pull_requests.side_effect = [
+            [],
+        ]
+
+        collector = GithubPullRequestCollector(
+            github,
+            queries=const_queries_from_list(["query"]),
+        )
+
+        collector.stop()
+        collector.start()
+
+        collector.join()
+
+        github.search_pull_requests.assert_called_once_with(
+            "query",
+            PR_QUERY_DATA,
+        )
 
     def test_run_queries(self):
         with patch("intm.collectors.github_pull_requests.datetime") as mock_utc_now:
@@ -255,8 +288,8 @@ class TestGithubPullRequestCollector(TestCase):
                 [],
             ]
 
+            collector.stop()  # call stop before start to ensure only one execution
             collector.start()
-            collector.stop()
 
             collector.join()
 
@@ -298,8 +331,8 @@ class TestGithubPullRequestCollector(TestCase):
         collector.pull_requests_needing_update_uris.add("owner/name#9")
         collector.pull_requests_needing_update_uris.add("owner/name#45")
 
+        collector.stop()  # call stop before start to ensure only one execution
         collector.start()
-        collector.stop()
 
         collector.join()
 
@@ -367,8 +400,8 @@ class TestGithubPullRequestCollector(TestCase):
             ),
         }
 
+        collector.stop()  # call stop before start to ensure only one execution
         collector.start()
-        collector.stop()
 
         collector.join()
 
@@ -436,12 +469,108 @@ class TestGithubPullRequestCollector(TestCase):
             ),
         }
 
+        collector.stop()  # call stop before start to ensure only one execution
         collector.start()
-        collector.stop()
 
         collector.join()
 
         github.get_pull_requests_by_ids.assert_called_once_with(
             ["id1", "id2"],
+            PR_QUERY_DATA,
+        )
+
+    def test_required_status_check(self):
+        """
+        Calculate the correct status checks
+        """
+        repo = Repository(name_with_owner="owner/name")
+        pr_one = PullRequest(
+            id="id1",
+            repository=repo,
+            number=1,
+            status_check_rollup=StatusCheckRollup(
+                contexts=[
+                    StatusContext(context="check_one"),
+                    CheckRun(name="check_two"),
+                ]
+            ),
+        )
+        pr_two = PullRequest(
+            id="id2",
+            repository=repo,
+            number=2,
+        )
+        pr_three = PullRequest(
+            id="id3",
+            repository=repo,
+            number=3,
+            status_check_rollup=StatusCheckRollup(
+                contexts=[
+                    CheckRun(name="check_one"),
+                ]
+            ),
+        )
+
+        github = Mock(spec=Github)
+        github.search_pull_requests.side_effect = [
+            [
+                pr_one,
+                pr_two,
+                pr_three,
+            ],
+        ]
+
+        required_status_checks = Mock()
+        required_status_checks.side_effect = [
+            ["check_one", "check_two"],
+            ["check_one"],
+            ["check_one", "check_two"],
+        ]
+
+        collector = GithubPullRequestCollector(
+            github,
+            queries=const_queries_from_list(["query"]),
+            required_status_checks_callback=required_status_checks,
+        )
+
+        collector.stop()  # call stop before start to ensure only one execution
+        collector.start()
+
+        collector.join()
+
+        self.assertListEqual(
+            sorted(
+                collector.pull_requests_map["owner/name#1"].required_status_checks,
+                key=lambda x: x.context if isinstance(x, StatusContext) else x.name,
+            ),
+            [
+                StatusContext(context="check_one"),
+                CheckRun(name="check_two"),
+            ],
+        )
+
+        self.assertListEqual(
+            sorted(
+                collector.pull_requests_map["owner/name#2"].required_status_checks,
+                key=lambda x: x.context if isinstance(x, StatusContext) else x.name,
+            ),
+            [
+                RequiredStatusCheck(name="check_one"),
+            ],
+        )
+
+        self.assertListEqual(
+            sorted(
+                collector.pull_requests_map["owner/name#3"].required_status_checks,
+                key=lambda x: x.context if isinstance(x, StatusContext) else x.name,
+            ),
+            [
+                CheckRun(name="check_one"),
+                RequiredStatusCheck(name="check_two"),
+            ],
+        )
+
+        github.search_pull_requests.assert_called_once_with(
+            "query",
             PR_QUERY_DATA,
         )

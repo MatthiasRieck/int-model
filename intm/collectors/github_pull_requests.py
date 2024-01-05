@@ -39,7 +39,7 @@ class PullRequestContainer(RootModel):
     updated_at: datetime
     dependencies: List[str] = Field(default_factory=list)
     required_status_checks: List[
-        Union[CheckRun, StatusContext, RequiredStatusCheck]
+        Union[RequiredStatusCheck, CheckRun, StatusContext]
     ] = Field(default_factory=list)
 
     @property
